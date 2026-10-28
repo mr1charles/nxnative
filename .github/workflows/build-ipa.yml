@@ -46,6 +46,11 @@ jobs:
           if ls "$RUNNER_TEMP"/game/*.part* >/dev/null 2>&1; then
             f=$(ls "$RUNNER_TEMP"/game/*.part00); cat "$RUNNER_TEMP"/game/*.part* > "${f%.part00}"; rm "$RUNNER_TEMP"/game/*.part*
           fi
+          for n in "$RUNNER_TEMP"/game/*_????????????????_*.nsp; do   # NAME_<16 hex title ID>_vN.nsp -> "NAME [ID][vN].nsp" (asset names cannot hold brackets)
+            [ -e "$n" ] || continue
+            b=$(basename "$n" .nsp); id=$(echo "$b" | grep -oE '[0-9A-Fa-f]{16}' | head -1)
+            mv "$n" "$RUNNER_TEMP/game/${b%%_*} [$id][${b##*_}].nsp"
+          done
           if [ -n "${{ inputs.title_id }}" ]; then
             for n in "$RUNNER_TEMP"/game/*.nsp; do mv "$n" "$RUNNER_TEMP/game/game [${{ inputs.title_id }}].nsp"; done
           fi
