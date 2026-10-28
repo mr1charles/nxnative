@@ -38,7 +38,7 @@ jobs:
           ls -la "$RUNNER_TEMP/game"
       - name: Pack
         if: ${{ inputs.build }}
-        run: python3 scripts/build_ipa_from_nsp.py "$RUNNER_TEMP/game" -k "$RUNNER_TEMP/prod.keys" --gpu none --progress lines 2>&1 | tee pack.log
+        run: python3 scripts/build_ipa_from_nsp.py "$RUNNER_TEMP/game" -k "$RUNNER_TEMP/prod.keys" --gpu none --allow-other-metal --progress lines 2>&1 | tee pack.log
       - name: Collect IPA
         if: ${{ inputs.build }}
         run: mkdir -p out && cp "$RUNNER_TEMP"/game/*.ipa out/
