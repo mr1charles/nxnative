@@ -10,6 +10,10 @@ on:
         description: "Release holding the game (pieces named *.partNN are joined)"
         type: string
         default: game
+      title_id:
+        description: "Title ID to put in the joined file's name (for a dump without a ticket or a [title ID] in its name)"
+        type: string
+        default: ""
 jobs:
   ipa:
     runs-on: macos-26
@@ -41,6 +45,9 @@ jobs:
           gh release download "${{ inputs.release }}" -D "$RUNNER_TEMP/game"
           if ls "$RUNNER_TEMP"/game/*.part* >/dev/null 2>&1; then
             f=$(ls "$RUNNER_TEMP"/game/*.part00); cat "$RUNNER_TEMP"/game/*.part* > "${f%.part00}"; rm "$RUNNER_TEMP"/game/*.part*
+          fi
+          if [ -n "${{ inputs.title_id }}" ]; then
+            for n in "$RUNNER_TEMP"/game/*.nsp; do mv "$n" "$RUNNER_TEMP/game/game [${{ inputs.title_id }}].nsp"; done
           fi
           ls -la "$RUNNER_TEMP/game"
       - name: Pack
