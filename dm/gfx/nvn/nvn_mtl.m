@@ -391,7 +391,7 @@ void mtl_init(void) {
     if (!g_dev) MDIE("no Metal device");
     if (!g_dev.hasUnifiedMemory) MDIE("needs a unified-memory device (zero-copy memory pools)");
     g_no_bc = ![g_dev supportsBCTextureCompression] || getenv("DM_FORCE_NO_BC") != NULL;
-    if (g_no_bc) MLOG("GPU has no BC texture support: BC1-5 and BC7 textures are decoded on the CPU at upload");
+    if (g_no_bc) MLOG("GPU has no BC texture support: BC1-BC7 textures are decoded on the CPU at upload");
     g_q = [g_dev newCommandQueue];
     // A device without Metal 4 (the paravirtualized GPU of a virtual Mac, such as GitHub's macos-26 runner: no residency set, no MTL4CommandQueue) cannot run the NVN layer. The GL and
     // Vulkan layers draw on classic queues of their own and need only the device (mtl_device_classic): there the classic part starts and presents are dropped, which is all a
@@ -1562,7 +1562,7 @@ void mtl_drain(void) { present_drop_for_suspend(); mtl_present_flush(); snap_dra
 
 // ================= Render replay =================
 #include "../../host/front.h"
-static int g_red_once[121];
+static int g_red_once[124];
 #define RED_ONCE(k, ...) do { if (!g_red_once[k]++) MLOG("[RED] " __VA_ARGS__); } while (0)
 // NVN vertex streams 0–15 → Metal vertex buffer slots: 0–13 go to 16–29 (30 is the constant fallback buffer), 14 and 15 to 14 and 15. Metal has only the 31 slots 0–30; translated shaders use only buffer(0) (the argument buffer),
 // and the host's own vertex functions read no vertex buffers. 13 Sentinels uses stream 15, and the old 16 + stream went out of range (Metal assertion: buffer index (31) must be < 31)
@@ -1582,6 +1582,10 @@ static int bc_sub(uint32_t pf, bcd_fmt *bf, uint32_t *out) {
         case MTLPixelFormatBC3_RGBA_sRGB: f = BCD_3; o = MTLPixelFormatRGBA8Unorm_sRGB; break;
         case MTLPixelFormatBC4_RUnorm: f = BCD_4U; o = MTLPixelFormatR8Unorm; break;
         case MTLPixelFormatBC5_RGUnorm: f = BCD_5U; o = MTLPixelFormatRG8Unorm; break;
+        case MTLPixelFormatBC4_RSnorm: f = BCD_4S; o = MTLPixelFormatR8Snorm; break;
+        case MTLPixelFormatBC5_RGSnorm: f = BCD_5S; o = MTLPixelFormatRG8Snorm; break;
+        case MTLPixelFormatBC6H_RGBUfloat: f = BCD_6U; o = MTLPixelFormatRGBA16Float; break;   // BC6H decodes to RGBA16F with alpha 1
+        case MTLPixelFormatBC6H_RGBFloat: f = BCD_6S; o = MTLPixelFormatRGBA16Float; break;
         case MTLPixelFormatBC7_RGBAUnorm: f = BCD_7; o = MTLPixelFormatRGBA8Unorm; break;
         case MTLPixelFormatBC7_RGBAUnorm_sRGB: f = BCD_7; o = MTLPixelFormatRGBA8Unorm_sRGB; break;
         default: return 0;
@@ -1596,7 +1600,7 @@ static int nvn_fmt_to_mtl_dev(int nf, uint32_t *pf, uint8_t swz[4]) {
     if (r && g_no_bc) {
         uint32_t sub;
         if (bc_sub(p, NULL, &sub)) p = sub;
-        else if (p >= MTLPixelFormatBC1_RGBA && p <= MTLPixelFormatBC7_RGBAUnorm_sRGB) { p = 0; RED_ONCE(120, "BC format %#x (signed or HDR) has no decoder yet on this GPU", nf); }
+        else if (p >= MTLPixelFormatBC1_RGBA && p <= MTLPixelFormatBC7_RGBAUnorm_sRGB) { p = 0; RED_ONCE(120, "BC format %#x has no decoder on this GPU", nf); }
     }
     if (pf) *pf = p;
     return r;
@@ -9404,6 +9408,24 @@ static void copy_b2t(const p_copy_b2t *c) {
        c->tex->d.format, level, layer0, c->r.xoffset, c->r.yoffset, c->r.zoffset, c->r.width, c->r.height, c->r.depth, (unsigned long long)c->src, row, img);
     void *mb; uint64_t mo;
     if (!mtl_addr(c->src, img * nz, &mb, &mo)) { RED_ONCE(23, "buffer→texture copy source is in no memory pool"); return; }
+    // A BC texture on a GPU without BC support holds decoded texels: the guest's compressed bytes are decoded now (the shared pool is host-readable) into a staging buffer that the blit copies,
+    // one block row at a time because the guest's row stride may exceed the tight one. The guest storage mirror below is for compressed data and does not apply.
+    bcd_fmt bcf;
+    if (bc_src_fmt(c->tex->d.format, &bcf)) {
+        const uint8_t *sp = (const uint8_t *)((__bridge id<MTLBuffer>)mb).contents + mo;
+        size_t opitch = (size_t)c->r.width * bcd_out_bpp(bcf), oimg = opitch * c->r.height;
+        id<MTLBuffer> sb = oimg * nz ? [g_dev newBufferWithLength:oimg * nz options:MTLResourceStorageModeShared] : nil;
+        if (!sb) { RED_ONCE(121, "BC buffer→texture copy: no %zu byte staging buffer", oimg * nz); return; }
+        res_add(sb);
+        for (int z = 0; z < nz; z++)
+            for (uint32_t by = 0; by < (uint32_t)c->r.height; by += 4)
+                bcd_decode_image(bcf, sp + z * img + (by / 4) * row, (uint32_t)c->r.width, MIN((uint32_t)4, (uint32_t)c->r.height - by), (uint8_t *)sb.contents + z * oimg + by * opitch, opitch);
+        id<MTL4ComputeCommandEncoder> b = blit();
+        if (is3d) enc_b_copy_buffer_texture(b, sb, 0, opitch, oimg, MTLSizeMake(c->r.width, c->r.height, nz), t, 0, level, MTLOriginMake(c->r.xoffset, c->r.yoffset, c->r.zoffset));
+        else for (int z = 0; z < nz; z++) enc_b_copy_buffer_texture(b, sb, z * oimg, opitch, oimg, MTLSizeMake(c->r.width, c->r.height, 1), t, layer0 + c->r.zoffset + z, level, MTLOriginMake(c->r.xoffset, c->r.yoffset, 0));
+        defer_obj_release(sb);
+        return;
+    }
     // The copy's bytes belong in the texture's storage: written there now from the buffer's, unless the GPU writes the buffer (a copy, fill or update queued in this submission: pend_hits; a shader
     // or a texture→buffer copy of it: sbw_hits; one of a submission still running: gw_live) or a readback into the texture is pending (read back after the copy then)
     int rb = !is3d && tex_storage_dst(c->tex);

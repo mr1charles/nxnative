@@ -42,6 +42,21 @@ static void bc4_plane(const uint8_t *s, uint8_t *dst, size_t stride, size_t step
     for (int i = 0; i < 16; i++) dst[(i >> 2) * stride + (i & 3) * step] = (uint8_t)v[(bits >> (3 * i)) & 7];
 }
 
+// Signed BC4 plane: endpoints are int8, results int8 in [-127, 127] (-128 reads as -1.0 like -127)
+static void bc4s_plane(const uint8_t *s, uint8_t *dst, size_t stride, size_t step) {
+    int a0 = (int8_t)s[0], a1 = (int8_t)s[1], v[8];
+    if (a0 < -127) a0 = -127;
+    if (a1 < -127) a1 = -127;
+    v[0] = a0; v[1] = a1;
+    #define RDIV(n, d) ((n) >= 0 ? ((n) + (d) / 2) / (d) : -(((-(n)) + (d) / 2) / (d)))
+    if (a0 > a1) for (int i = 1; i < 7; i++) { int n = (7 - i) * a0 + i * a1; v[i + 1] = RDIV(n, 7); }
+    else { for (int i = 1; i < 5; i++) { int n = (5 - i) * a0 + i * a1; v[i + 1] = RDIV(n, 5); } v[6] = -127; v[7] = 127; }
+    #undef RDIV
+    uint64_t bits = 0;
+    for (int i = 0; i < 6; i++) bits |= (uint64_t)s[2 + i] << (8 * i);
+    for (int i = 0; i < 16; i++) dst[(i >> 2) * stride + (i & 3) * step] = (uint8_t)(int8_t)v[(bits >> (3 * i)) & 7];
+}
+
 // BC7
 static const uint8_t bc7_mode[8][9] = {  // ns, pb, rb, isb, cb, ab, epb, spb, ib
     {3, 4, 0, 0, 4, 0, 1, 0, 3}, {2, 6, 0, 0, 6, 0, 0, 1, 3}, {3, 6, 0, 0, 5, 0, 0, 0, 2}, {2, 6, 0, 0, 7, 0, 1, 0, 2},
@@ -112,13 +127,17 @@ void bcd_decode_block(bcd_fmt f, const uint8_t *s, uint8_t *dst, size_t stride) 
     case BCD_4U: bc4_plane(s, dst, stride, 1); break;
     case BCD_5U: bc4_plane(s, dst, stride, 2); bc4_plane(s + 8, dst + 1, stride, 2); break;
     case BCD_7: bc7_block(s, dst, stride); break;
+    case BCD_6U: bcd_bc6h_block(s, dst, stride, 0); break;
+    case BCD_6S: bcd_bc6h_block(s, dst, stride, 1); break;
+    case BCD_4S: bc4s_plane(s, dst, stride, 1); break;
+    case BCD_5S: bc4s_plane(s, dst, stride, 2); bc4s_plane(s + 8, dst + 1, stride, 2); break;
     }
 }
 
 void bcd_decode_image(bcd_fmt f, const uint8_t *src, uint32_t w, uint32_t h, uint8_t *dst, size_t stride) {
     int bb = bcd_block_bytes(f), bpp = bcd_out_bpp(f);
     uint32_t bw = (w + 3) / 4, bh = (h + 3) / 4;
-    uint8_t tmp[4 * 16];
+    uint8_t tmp[4 * 4 * 8];
     for (uint32_t by = 0; by < bh; by++) for (uint32_t bx = 0; bx < bw; bx++) {
         const uint8_t *s = src + ((size_t)by * bw + bx) * bb;
         uint32_t cw = w - bx * 4 < 4 ? w - bx * 4 : 4, ch = h - by * 4 < 4 ? h - by * 4 : 4;
