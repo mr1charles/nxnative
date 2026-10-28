@@ -12,6 +12,7 @@
 #include "romfs_image.h"
 #include "romfs_identity.h"
 #include "player_env.h"
+void dm_log_server_start(const char *log, const char *prev);
 #ifndef DM_PLAYER_BUILD
 #define DM_PLAYER_BUILD 0
 #endif
@@ -92,6 +93,7 @@ static int boot_env(void) {
     NSString *log = [doc stringByAppendingPathComponent:@"log.txt"], *prev = [doc stringByAppendingPathComponent:@"log.prev.txt"];
     [fm removeItemAtPath:prev error:nil]; [fm moveItemAtPath:log toPath:prev error:nil];
     if (freopen(log.fileSystemRepresentation, "w", stderr)) setvbuf(stderr, NULL, _IOLBF, 0);
+    dm_log_server_start(log.fileSystemRepresentation, prev.fileSystemRepresentation);   // LogServer.m: the log over HTTP on port 8765 (USB via iproxy, or Wi-Fi)
     // Environment switch files (for on-device diagnostics: a sideloaded app cannot be given environment variables from outside): one KEY=VALUE per line, # starts a comment; Documents/env.txt takes precedence over dm/env.txt in the bundle (put there by build_ipa.sh's DM_ENV_FILE)
     NSMutableArray<NSString *> *from_file = [NSMutableArray array], *from_launch = [NSMutableArray array];
     for (char **e = environ; *e; e++) {   // set at launch (Xcode, devicectl): before the env files, and the launcher keeps them
