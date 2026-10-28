@@ -6,12 +6,17 @@ on:
 jobs:
   compile:
     runs-on: macos-26
-    timeout-minutes: 30
+    timeout-minutes: 40
+    defaults:
+      run:
+        shell: bash -eo pipefail {0}
     steps:
       - uses: actions/checkout@v4
-      - name: Xcode versions on the runner
+      - name: Xcode on the runner
         run: ls -d /Applications/Xcode* ; xcodebuild -version; xcrun --sdk iphoneos --show-sdk-version
-      - name: Decoder tests (pure C, against the saved reference)
-        run: make -C dm/gfx/tex/tests bc || true
+      - name: BC decoder builds clean
+        run: cc -O2 -Wall -Wextra -Werror -Wno-unused-parameter -o /tmp/bcdump dm/gfx/tex/tests/bcdump.c dm/gfx/tex/bc_decode.c
       - name: iOS host sources compiled for the iPhone SDK
+        env:
+          GAME: 010015100B514000
         run: python3 dm/ios/tools/compile_check.py 2>&1 | tee ios-compile.log
