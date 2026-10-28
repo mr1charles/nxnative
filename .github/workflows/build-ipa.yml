@@ -1,0 +1,56 @@
+name: Build IPA (private)
+on:
+  workflow_dispatch:
+    inputs:
+      build:
+        description: "Pack the IPA (needs the PROD_KEYS_B64 secret and a release named 'game' holding the NSP). Off = only check the toolchain."
+        type: boolean
+        default: false
+jobs:
+  ipa:
+    runs-on: macos-26
+    timeout-minutes: 180
+    defaults:
+      run:
+        shell: bash -eo pipefail {0}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Machine
+        run: |
+          uname -m; sw_vers; xcodebuild -version; xcrun --sdk iphoneos --show-sdk-version; df -h / | tail -1
+          sysctl -n machdep.cpu.brand_string; system_profiler SPDisplaysDataType | grep -iE "chipset|metal" || true
+      - name: Tools
+        run: |
+          brew install xcodegen zstd glslang
+          brew install --cask dotnet-sdk
+          xcodebuild -downloadComponent MetalToolchain
+          python3 -m pip install --break-system-packages lz4 capstone fonttools nsz "backports.zstd; python_version < '3.14'"
+      - name: Fetch keys and game
+        if: ${{ inputs.build }}
+        env:
+          PROD_KEYS_B64: ${{ secrets.PROD_KEYS_B64 }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          test -n "$PROD_KEYS_B64"
+          echo "$PROD_KEYS_B64" | base64 -d > "$RUNNER_TEMP/prod.keys"
+          mkdir -p "$RUNNER_TEMP/game"
+          gh release download game -D "$RUNNER_TEMP/game"
+          ls -la "$RUNNER_TEMP/game"
+      - name: Pack
+        if: ${{ inputs.build }}
+        run: python3 scripts/build_ipa_from_nsp.py "$RUNNER_TEMP/game" -k "$RUNNER_TEMP/prod.keys" --gpu none --progress lines 2>&1 | tee pack.log
+      - name: Collect IPA
+        if: ${{ inputs.build }}
+        run: mkdir -p out && cp "$RUNNER_TEMP"/game/*.ipa out/
+      - uses: actions/upload-artifact@v4
+        if: ${{ inputs.build }}
+        with:
+          name: ipa
+          path: out/*.ipa
+          retention-days: 3
+      - uses: actions/upload-artifact@v4
+        if: ${{ always() && inputs.build }}
+        with:
+          name: pack-log
+          path: pack.log
+          retention-days: 3
