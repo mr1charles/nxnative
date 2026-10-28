@@ -230,10 +230,13 @@ void front_ios_audio_session(void) {
     AVAudioSession *s = AVAudioSession.sharedInstance; NSError *e = nil;
     if (![s setCategory:AVAudioSessionCategoryPlayback error:&e]) LOG("[RED] audio session category could not be set: %s", e.localizedDescription.UTF8String);
     [s setPreferredSampleRate:48000 error:nil];
-    if (![s setPreferredIOBufferDuration:0.005 error:&e]) LOG("[RED] audio session I/O buffer duration could not be set: %s", e.localizedDescription.UTF8String);
+    // Low Power Mode slows the CPU: 5 ms callbacks missed their deadline there (crackling on an iPhone 12), so ask for 10 ms (still under the 20 ms the renderer keeps queued). DM_AUDIO_BUFFER_MS overrides
+    double want = getenv("DM_AUDIO_BUFFER_MS") ? atof(getenv("DM_AUDIO_BUFFER_MS")) / 1000.0 : (dm_low_power_now() ? 0.010 : 0.005);
+    if (want < 0.002 || want > 0.015) want = 0.005;
+    if (![s setPreferredIOBufferDuration:want error:&e]) LOG("[RED] audio session I/O buffer duration could not be set: %s", e.localizedDescription.UTF8String);
     g_session_off = ![s setActive:YES error:&e];
     if (g_session_off) LOG("[RED] audio session activation failed: %s", e.localizedDescription.UTF8String);
-    LOG("audio session: sample rate %.0f Hz, I/O buffer %.2f ms (asked for 5 ms)", s.sampleRate, s.IOBufferDuration * 1000);
+    LOG("audio session: sample rate %.0f Hz, I/O buffer %.2f ms (asked for %.0f ms)", s.sampleRate, s.IOBufferDuration * 1000, want * 1000);
 }
 
 // Real audio output is suspended (the silent sink paces the game) while the app is in the background or another audio session has interrupted ours (Siri, an alarm, a call).
