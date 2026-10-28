@@ -101,29 +101,29 @@ static void bc7_block(const uint8_t *s, uint8_t *dst, size_t stride) {
     }
 }
 
-void bc_decode_block(bc_fmt f, const uint8_t *s, uint8_t *dst, size_t stride) {
+void bcd_decode_block(bcd_fmt f, const uint8_t *s, uint8_t *dst, size_t stride) {
     switch (f) {
-    case BC_1: bc1_color(s, dst, stride, 0, 1); break;
-    case BC_2:
+    case BCD_1: bc1_color(s, dst, stride, 0, 1); break;
+    case BCD_2:
         bc1_color(s + 8, dst, stride, 1, 0);
         for (int i = 0; i < 16; i++) { int a = (s[i >> 1] >> ((i & 1) * 4)) & 15; dst[(i >> 2) * stride + (i & 3) * 4 + 3] = (uint8_t)(a << 4 | a); }
         break;
-    case BC_3: bc1_color(s + 8, dst, stride, 1, 0); bc4_plane(s, dst + 3, stride, 4); break;
-    case BC_4U: bc4_plane(s, dst, stride, 1); break;
-    case BC_5U: bc4_plane(s, dst, stride, 2); bc4_plane(s + 8, dst + 1, stride, 2); break;
-    case BC_7: bc7_block(s, dst, stride); break;
+    case BCD_3: bc1_color(s + 8, dst, stride, 1, 0); bc4_plane(s, dst + 3, stride, 4); break;
+    case BCD_4U: bc4_plane(s, dst, stride, 1); break;
+    case BCD_5U: bc4_plane(s, dst, stride, 2); bc4_plane(s + 8, dst + 1, stride, 2); break;
+    case BCD_7: bc7_block(s, dst, stride); break;
     }
 }
 
-void bc_decode_image(bc_fmt f, const uint8_t *src, uint32_t w, uint32_t h, uint8_t *dst, size_t stride) {
-    int bb = bc_block_bytes(f), bpp = bc_out_bpp(f);
+void bcd_decode_image(bcd_fmt f, const uint8_t *src, uint32_t w, uint32_t h, uint8_t *dst, size_t stride) {
+    int bb = bcd_block_bytes(f), bpp = bcd_out_bpp(f);
     uint32_t bw = (w + 3) / 4, bh = (h + 3) / 4;
     uint8_t tmp[4 * 16];
     for (uint32_t by = 0; by < bh; by++) for (uint32_t bx = 0; bx < bw; bx++) {
         const uint8_t *s = src + ((size_t)by * bw + bx) * bb;
         uint32_t cw = w - bx * 4 < 4 ? w - bx * 4 : 4, ch = h - by * 4 < 4 ? h - by * 4 : 4;
-        if (cw == 4 && ch == 4) { bc_decode_block(f, s, dst + (size_t)by * 4 * stride + (size_t)bx * 4 * bpp, stride); continue; }
-        bc_decode_block(f, s, tmp, 4 * bpp);
+        if (cw == 4 && ch == 4) { bcd_decode_block(f, s, dst + (size_t)by * 4 * stride + (size_t)bx * 4 * bpp, stride); continue; }
+        bcd_decode_block(f, s, tmp, 4 * bpp);
         for (uint32_t y = 0; y < ch; y++) memcpy(dst + ((size_t)by * 4 + y) * stride + (size_t)bx * 4 * bpp, tmp + y * 4 * bpp, (size_t)cw * bpp);
     }
 }

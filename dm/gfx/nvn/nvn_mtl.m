@@ -80,6 +80,7 @@ static int g_warm_started;
 static void warm_claim(void);
 
 static id<MTLDevice> g_dev;
+static int g_no_bc;   // the GPU has no BC texture support (set at device creation; see nvn_fmt_to_mtl_dev)
 static NSMutableArray *g_l3_gpu_leaks;
 static int g_nvn_deswz_gpu;
 static id<MTLCommandQueue> g_q;
@@ -1570,20 +1571,19 @@ static int g_red_once[121];
 // ---------- Texture → MTLTexture ----------
 // GPUs without BC texture support (A14 and older, so iPhone 12): a BC format is made as an uncompressed Metal format the CPU decodes into at upload (pkg_upload_, tex/bc_decode.c).
 // Every nvn_fmt_to_mtl below goes through this, so views, copies and descriptors all agree on the substitute. DM_FORCE_NO_BC=1 turns it on for a GPU that has BC, to test it on a Mac.
-static int g_no_bc;
-static int bc_sub(uint32_t pf, bc_fmt *bf, uint32_t *out) {
-    bc_fmt f; uint32_t o;
+static int bc_sub(uint32_t pf, bcd_fmt *bf, uint32_t *out) {
+    bcd_fmt f; uint32_t o;
     switch ((MTLPixelFormat)pf) {
-        case MTLPixelFormatBC1_RGBA: f = BC_1; o = MTLPixelFormatRGBA8Unorm; break;
-        case MTLPixelFormatBC1_RGBA_sRGB: f = BC_1; o = MTLPixelFormatRGBA8Unorm_sRGB; break;
-        case MTLPixelFormatBC2_RGBA: f = BC_2; o = MTLPixelFormatRGBA8Unorm; break;
-        case MTLPixelFormatBC2_RGBA_sRGB: f = BC_2; o = MTLPixelFormatRGBA8Unorm_sRGB; break;
-        case MTLPixelFormatBC3_RGBA: f = BC_3; o = MTLPixelFormatRGBA8Unorm; break;
-        case MTLPixelFormatBC3_RGBA_sRGB: f = BC_3; o = MTLPixelFormatRGBA8Unorm_sRGB; break;
-        case MTLPixelFormatBC4_RUnorm: f = BC_4U; o = MTLPixelFormatR8Unorm; break;
-        case MTLPixelFormatBC5_RGUnorm: f = BC_5U; o = MTLPixelFormatRG8Unorm; break;
-        case MTLPixelFormatBC7_RGBAUnorm: f = BC_7; o = MTLPixelFormatRGBA8Unorm; break;
-        case MTLPixelFormatBC7_RGBAUnorm_sRGB: f = BC_7; o = MTLPixelFormatRGBA8Unorm_sRGB; break;
+        case MTLPixelFormatBC1_RGBA: f = BCD_1; o = MTLPixelFormatRGBA8Unorm; break;
+        case MTLPixelFormatBC1_RGBA_sRGB: f = BCD_1; o = MTLPixelFormatRGBA8Unorm_sRGB; break;
+        case MTLPixelFormatBC2_RGBA: f = BCD_2; o = MTLPixelFormatRGBA8Unorm; break;
+        case MTLPixelFormatBC2_RGBA_sRGB: f = BCD_2; o = MTLPixelFormatRGBA8Unorm_sRGB; break;
+        case MTLPixelFormatBC3_RGBA: f = BCD_3; o = MTLPixelFormatRGBA8Unorm; break;
+        case MTLPixelFormatBC3_RGBA_sRGB: f = BCD_3; o = MTLPixelFormatRGBA8Unorm_sRGB; break;
+        case MTLPixelFormatBC4_RUnorm: f = BCD_4U; o = MTLPixelFormatR8Unorm; break;
+        case MTLPixelFormatBC5_RGUnorm: f = BCD_5U; o = MTLPixelFormatRG8Unorm; break;
+        case MTLPixelFormatBC7_RGBAUnorm: f = BCD_7; o = MTLPixelFormatRGBA8Unorm; break;
+        case MTLPixelFormatBC7_RGBAUnorm_sRGB: f = BCD_7; o = MTLPixelFormatRGBA8Unorm_sRGB; break;
         default: return 0;
     }
     if (bf) *bf = f;
@@ -1602,7 +1602,7 @@ static int nvn_fmt_to_mtl_dev(int nf, uint32_t *pf, uint8_t swz[4]) {
     return r;
 }
 // The decoder a NVN format needs on such a GPU (0 when the format is not one of BC1-5 / BC7 unsigned, or when the GPU has BC)
-static int bc_src_fmt(int nvn_format, bc_fmt *bf) {
+static int bc_src_fmt(int nvn_format, bcd_fmt *bf) {
     uint32_t p = 0; uint8_t swz[4];
     return g_no_bc && nvn_fmt_to_mtl(nvn_format, &p, swz) && bc_sub(p, bf, NULL);
 }
@@ -2187,7 +2187,7 @@ static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp, id<MTLTexture
     MTLTextureDescriptor *d = tex_desc(t, 1);
     if (!d) return nil;
     // A BC texture on a GPU without BC support is made uncompressed (nvn_fmt_to_mtl_dev) and decoded on the CPU below, so the GPU deswizzle paths are off for it
-    bc_fmt bcf = BC_1; int dec = 0;
+    bcd_fmt bcf = BCD_1; int dec = 0;
     dec = bc_src_fmt(t->d.format, &bcf);
     int direct = !dec && stamp && direct_upload_on() && g_nvn_deswz_gpu && !(t->pool && nvn_sparse_pool(t->pool)) && nvn_deswz_gpu_direct_supported(&t->d);
     if (direct) d.usage |= MTLTextureUsageShaderWrite | MTLTextureUsagePixelFormatView;
@@ -2206,7 +2206,7 @@ static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp, id<MTLTexture
     size_t total = 0;
     for (unsigned l = 0; l < d.mipmapLevelCount; l++) {
         uint32_t w = MAX(t->d.width >> l, 1u), h = MAX(t->d.height >> l, 1u), z = t->d.target == 2 ? MAX(t->d.depth >> l, 1u) : 1;
-        total += dec ? (size_t)w * h * z * layers * bc_out_bpp(bcf) : (size_t)((w + bw - 1) / bw) * bpb * ((h + bh - 1) / bh) * z * layers;
+        total += dec ? (size_t)w * h * z * layers * bcd_out_bpp(bcf) : (size_t)((w + bw - 1) / bw) * bpb * ((h + bh - 1) / bh) * z * layers;
     }
     g_bp_up_bytes += total;
     void *mb; uint64_t mo;
@@ -2270,11 +2270,11 @@ static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp, id<MTLTexture
         uint32_t w = MAX(t->d.width >> l, 1u), h = MAX(t->d.height >> l, 1u), z = t->d.target == 2 ? MAX(t->d.depth >> l, 1u) : 1;
         size_t pitch = (size_t)((w + bw - 1) / bw) * bpb, rows = (h + bh - 1) / bh;
         if (dec) {
-            size_t need = pitch * rows * z, opitch = (size_t)w * bc_out_bpp(bcf);
+            size_t need = pitch * rows * z, opitch = (size_t)w * bcd_out_bpp(bcf);
             if (need > bctmp_n) { free(bctmp); bctmp = malloc(need); bctmp_n = bctmp ? need : 0; if (!bctmp) MDIE("BC level of %zu bytes failed", need); }
             for (unsigned y = 0; y < layers; y++) {
                 if (nvn_deswizzle(&t->d, l, y, src, bctmp, pitch)) { RED_ONCE(9, "deswizzle failed format %#x target %d", t->d.format, t->d.target); break; }
-                for (uint32_t zz = 0; zz < z; zz++) bc_decode_image(bcf, bctmp + zz * pitch * rows, w, h, (uint8_t *)stg.contents + off + zz * opitch * h, opitch);
+                for (uint32_t zz = 0; zz < z; zz++) bcd_decode_image(bcf, bctmp + zz * pitch * rows, w, h, (uint8_t *)stg.contents + off + zz * opitch * h, opitch);
                 up_blit_add(stg, off, opitch, opitch * h, MTLSizeMake(w, h, z), mt, y, l);
                 off += opitch * h * z;
             }
