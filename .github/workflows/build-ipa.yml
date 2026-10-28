@@ -6,6 +6,10 @@ on:
         description: "Pack the IPA (needs the PROD_KEYS_B64 secret and a release named 'game' holding the NSP). Off = only check the toolchain."
         type: boolean
         default: false
+      release:
+        description: "Release holding the game (pieces named *.partNN are joined)"
+        type: string
+        default: game
 jobs:
   ipa:
     runs-on: macos-26
@@ -34,7 +38,10 @@ jobs:
           test -n "$PROD_KEYS_B64"
           echo "$PROD_KEYS_B64" | base64 -d > "$RUNNER_TEMP/prod.keys"
           mkdir -p "$RUNNER_TEMP/game"
-          gh release download game -D "$RUNNER_TEMP/game"
+          gh release download "${{ inputs.release }}" -D "$RUNNER_TEMP/game"
+          if ls "$RUNNER_TEMP"/game/*.part* >/dev/null 2>&1; then
+            f=$(ls "$RUNNER_TEMP"/game/*.part00); cat "$RUNNER_TEMP"/game/*.part* > "${f%.part00}"; rm "$RUNNER_TEMP"/game/*.part*
+          fi
           ls -la "$RUNNER_TEMP/game"
       - name: Pack
         if: ${{ inputs.build }}
