@@ -771,7 +771,7 @@ def jump_adr_offsets(insl, j):
             if m and m.group(1) in idx: idx.add(m.group(2)); continue
             m = re.fullmatch(r'(w\d+), #(0x[0-9a-f]+|\d+)', p.op_str) if p.mnemonic == 'cmp' else None
             if m and m.group(1) in idx: cmp = p; break
-            if any('w' + p.reg_name(r)[1:] in idx for r in p.regs_access()[1]): return None   # the index changes after the check
+            if any(p.reg_name(r)[0] in 'wx' and 'w' + p.reg_name(r)[1:] in idx for r in p.regs_access()[1]): return None   # the index changes after the check (only integer registers: s0 / d0 are not w0)
         if cmp is None: return None
         n, at = int(cmp.op_str.split('#')[1], 0) + 1, wa.operands[1].imm
         def targets(tb): return [at + struct.unpack_from('<i', IMG, tb + 4 * i)[0] for i in range(n)] if 0 <= tb and tb + 4 * n <= len(IMG) else None
