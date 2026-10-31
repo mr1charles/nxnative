@@ -1,0 +1,81 @@
+name: Build IPA (draft release in, draft release out)
+# The game comes from a DRAFT release (visible only to repo writers) and the IPA goes back to a draft release;
+# nothing from the game or the IPA is attached to the (public) run. prod.keys is a repository secret.
+on:
+  workflow_dispatch:
+    inputs:
+      game_release:
+        description: "Name of the draft release holding the NSP"
+        type: string
+        default: dreambuffet-game
+      app_pool:
+        type: string
+        default: ""
+      op_mode:
+        type: string
+        default: ""
+      env_lines:
+        description: "Diagnostic switches, KEY=VALUE separated by semicolons"
+        type: string
+        default: ""
+      out_name:
+        description: "Name of the draft release the IPA is uploaded to"
+        type: string
+        default: ipa-out
+jobs:
+  ipa:
+    runs-on: macos-26
+    permissions:
+      contents: write
+    timeout-minutes: 180
+    defaults:
+      run:
+        shell: bash -eo pipefail {0}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: build-main
+      - name: Tools
+        run: |
+          brew install xcodegen zstd glslang
+          brew install --cask dotnet-sdk
+          xcodebuild -downloadComponent MetalToolchain
+          python3 -m pip install --break-system-packages lz4 capstone fonttools nsz "backports.zstd; python_version < '3.14'"
+      - name: Fetch keys and game
+        env:
+          PROD_KEYS_B64: ${{ secrets.PROD_KEYS_B64 }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          test -n "$PROD_KEYS_B64"
+          echo "$PROD_KEYS_B64" | base64 -d > "$RUNNER_TEMP/prod.keys"
+          mkdir -p "$RUNNER_TEMP/game"
+          rid=$(gh api "repos/$GITHUB_REPOSITORY/releases" --paginate --jq ".[]|select(.name==\"${{ inputs.game_release }}\")|.id" | head -1)
+          test -n "$rid"
+          gh api "repos/$GITHUB_REPOSITORY/releases/$rid/assets" --jq '.[]|"\(.id) \(.name)"' | while read -r id name; do
+            gh api -H "Accept: application/octet-stream" "repos/$GITHUB_REPOSITORY/releases/assets/$id" > "$RUNNER_TEMP/game/$name"
+          done
+          for n in "$RUNNER_TEMP"/game/*_????????????????_*.nsp; do
+            [ -e "$n" ] || continue
+            b=$(basename "$n" .nsp); id=$(echo "$b" | grep -oE '[0-9A-Fa-f]{16}' | head -1)
+            mv "$n" "$RUNNER_TEMP/game/${b%%_*} [$id][${b##*_}].nsp"
+          done
+          ls -la "$RUNNER_TEMP/game"
+      - name: Pack
+        env:
+          NX_APP_POOL: ${{ inputs.app_pool }}
+          NX_OP_MODE: ${{ inputs.op_mode }}
+          ENV_LINES: ${{ inputs.env_lines }}
+        run: |
+          EXTRA=()
+          if [ -n "$ENV_LINES" ]; then echo "$ENV_LINES" | tr ';' '\n' > "$RUNNER_TEMP/env.txt"; cat "$RUNNER_TEMP/env.txt"; EXTRA=(--env-file "$RUNNER_TEMP/env.txt"); fi
+          python3 scripts/build_ipa_from_nsp.py "$RUNNER_TEMP/game" -k "$RUNNER_TEMP/prod.keys" --gpu none --allow-other-metal --progress lines "${EXTRA[@]}" 2>&1 | tee pack.log
+      - name: IPA to the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          rid=$(gh api "repos/$GITHUB_REPOSITORY/releases" --paginate --jq ".[]|select(.name==\"${{ inputs.out_name }}\")|.id" | head -1)
+          if [ -z "$rid" ]; then rid=$(gh api "repos/$GITHUB_REPOSITORY/releases" -f tag_name=ipa-out-tag -f name="${{ inputs.out_name }}" -F draft=true --jq .id); fi
+          for f in "$RUNNER_TEMP"/game/*.ipa; do
+            curl -sS --fail -X POST -H "Authorization: Bearer $GH_TOKEN" -H "Content-Type: application/octet-stream" \
+              --data-binary @"$f" "https://uploads.github.com/repos/$GITHUB_REPOSITORY/releases/$rid/assets?name=$(basename "$f" | tr ' ' '_')" | head -c 200
+          done
