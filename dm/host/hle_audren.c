@@ -12,6 +12,7 @@
 // Command list format (SDK 16): header +0x04 command count, +0x08 mix buffer address, +0x10 buffer count, +0x14 samples per frame, +0x18 sample rate, commands from +0x20;
 //   each command +0x00 magic 0xcafebabe, +0x04 enabled, +0x05 command ID (DeviceSink = 0x13), +0x06 size; DeviceSink +0x128 upsampler buffer, +0x130 input count, +0x134 input indices (s16).
 #include "hle.h"
+#include <TargetConditionals.h>
 #include <math.h>
 #include <stdatomic.h>
 #include <time.h>
@@ -28,7 +29,7 @@ void dm_pcmout_wait(void *k, int ms);
 
 // P_SIZE: bytes of the game's AudioRendererParameter copied before the two fields are changed. SDK 16's struct is 0x38 bytes; SDK 8's (Link's Awakening) has one more word,
 // its revision at +0x38: copying only 0x38 left the revision uninitialized and the SDK rejected it (CheckValidRevision, Result 0x499). The SDK reads only its own size of the copy
-enum { P_DEVICE = 0x2c, P_MODE = 0x30, P_SIZE = 0x40, WORK_PAGE = 0x1000, FRAME_MAX = 1024, NBUF = 4 };
+enum { P_DEVICE = 0x2c, P_MODE = 0x30, P_SIZE = 0x40, WORK_PAGE = 0x1000, FRAME_MAX = 1024, NBUF_MAX = 16 };
 static void *gsym(const char *n) { void *p = guest_sym(n); if (!p) die("audren: missing SDK symbol %s", n); return p; }
 static void cpu_manual(uint8_t *dst, const uint8_t *src) { memcpy(dst, src, P_SIZE); *(int32_t *)(dst + P_DEVICE) = 1; *(int32_t *)(dst + P_MODE) = 1; }
 
@@ -93,14 +94,25 @@ static pthread_mutex_t g_cq_mu = PTHREAD_MUTEX_INITIALIZER; static pthread_cond_
 static void cq_popped(void) { pthread_mutex_lock(&g_cq_mu); pthread_cond_broadcast(&g_cq_cv); pthread_mutex_unlock(&g_cq_mu); }
 
 typedef struct { void *ptr; uint64_t cap, size; } gbuf;       // same as the front of hle_audio.c's AudioOutBuffer
+// Blocks kept in flight, 5 ms each. 4 is enough on a Mac, but on a phone a render that runs late (a slow CPU in Low Power Mode, a garbage collection) empties 20 ms and crackles: 8 (40 ms) on iOS, 12 (60 ms) in Low Power Mode. DM_AUDREN_BUFFERS overrides
+__attribute__((weak)) int dm_low_power_now(void);
+static int render_buffers(void) {
+    const char *e = getenv("DM_AUDREN_BUFFERS"); int n = e ? atoi(e) : 0;
+    if (n >= 2 && n <= NBUF_MAX) return n;
+#if TARGET_OS_IPHONE
+    return dm_low_power_now && dm_low_power_now() ? 12 : 8;
+#else
+    return 4;
+#endif
+}
 static void render_main(void *arg) {
     (void)arg;
     void (*exec)(void *, void *) = gsym("_ZN2nn5audio29ExecuteAudioRendererRenderingENS0_19AudioRendererHandleE");
     void *out = dm_pcmout_open(2);
-    static int16_t data[NBUF][FRAME_MAX * 2]; static gbuf bufs[NBUF]; gbuf *free_list[NBUF]; int nfree = NBUF;
-    for (int i = 0; i < NBUF; i++) { bufs[i] = (gbuf){data[i], sizeof data[i], 0}; free_list[i] = &bufs[i]; }
+    static int16_t data[NBUF_MAX][FRAME_MAX * 2]; static gbuf bufs[NBUF_MAX]; gbuf *free_list[NBUF_MAX]; const int nbuf = render_buffers(); int nfree = nbuf;
+    for (int i = 0; i < nbuf; i++) { bufs[i] = (gbuf){data[i], sizeof data[i], 0}; free_list[i] = &bufs[i]; }
     dm_pcmout_start(out);
-    LOG("audren: render thread started (%d buffers in flight, paced by the output)", NBUF);
+    LOG("audren: render thread started (%d buffers in flight, paced by the output)", nbuf);
     while (atomic_load(&g_open)) {
         while (!nfree) {   // wait for the output to hand a block back (silent sink / sound card, one every 5 ms); it signals each release, so the thread sleeps until then (it used to poll every 1 ms)
             gbuf *b = dm_pcmout_released(out);
