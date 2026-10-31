@@ -22,6 +22,10 @@ on:
         description: "Title ID to put in the joined file's name (for a dump without a ticket or a [title ID] in its name)"
         type: string
         default: ""
+      env_lines:
+        description: "Diagnostic switches baked into the app, KEY=VALUE separated by semicolons (e.g. DM_HITCH_DUMP=3000:10)"
+        type: string
+        default: ""
       to_release:
         description: "Put the IPA on the 'ipas' release instead of a build artifact (artifact storage can run out; under 2 GB only)"
         type: boolean
@@ -74,7 +78,11 @@ jobs:
         env:
           NX_APP_POOL: ${{ inputs.app_pool }}
           NX_OP_MODE: ${{ inputs.op_mode }}
-        run: python3 scripts/build_ipa_from_nsp.py "$RUNNER_TEMP/game" -k "$RUNNER_TEMP/prod.keys" --gpu none --allow-other-metal --progress lines 2>&1 | tee pack.log
+          ENV_LINES: ${{ inputs.env_lines }}
+        run: |
+          EXTRA=()
+          if [ -n "$ENV_LINES" ]; then echo "$ENV_LINES" | tr ';' '\n' > "$RUNNER_TEMP/env.txt"; cat "$RUNNER_TEMP/env.txt"; EXTRA=(--env-file "$RUNNER_TEMP/env.txt"); fi
+          python3 scripts/build_ipa_from_nsp.py "$RUNNER_TEMP/game" -k "$RUNNER_TEMP/prod.keys" --gpu none --allow-other-metal --progress lines "${EXTRA[@]}" 2>&1 | tee pack.log
       - name: Collect IPA
         if: ${{ inputs.build }}
         run: mkdir -p out && cp "$RUNNER_TEMP"/game/*.ipa out/
