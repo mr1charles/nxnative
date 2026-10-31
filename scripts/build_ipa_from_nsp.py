@@ -749,6 +749,8 @@ def write_profile(pdir, app, f):
          '# ---- Shader split ----', *key('shader_groups', " ".join(groups) or "/=romfs"), f'shader_note{T}{name} shaders (provisional profile)']
     if os.environ.get('NX_APP_POOL'):   # a smaller heap for a phone with a lower process memory limit (e.g. NX_APP_POOL=0x68000000 for about 1.6 GB)
         L = [f'app_pool{T}{os.environ["NX_APP_POOL"]}' if l.startswith('app_pool' + T) else l for l in L]; say(f'app_pool set to {os.environ["NX_APP_POOL"]} (NX_APP_POOL)')
+    if os.environ.get('NX_OP_MODE'):   # the console mode the settings screen starts on: 0 handheld (lighter), 1 console
+        L = [l for l in L if not l.startswith('op_mode' + T)] + [f'op_mode{T}{os.environ["NX_OP_MODE"]}']; say(f'op_mode set to {os.environ["NX_OP_MODE"]} (NX_OP_MODE)')
     (pdir / 'game.tsv').write_text('\n'.join(L) + '\n', encoding='utf-8')
     for n, text in EMPTY_TABLES.items(): (pdir / n).write_text(text)
     say(f'wrote a provisional game profile: {pdir / "game.tsv"}')

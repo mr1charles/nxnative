@@ -14,6 +14,10 @@ on:
         description: "Heap size override, hex (e.g. 0x68000000 = about 1.6 GB), for phones that kill big apps"
         type: string
         default: ""
+      op_mode:
+        description: "Console mode the game starts on: 0 handheld (lighter), 1 console; empty keeps the profile's"
+        type: string
+        default: ""
       title_id:
         description: "Title ID to put in the joined file's name (for a dump without a ticket or a [title ID] in its name)"
         type: string
@@ -69,6 +73,7 @@ jobs:
         if: ${{ inputs.build }}
         env:
           NX_APP_POOL: ${{ inputs.app_pool }}
+          NX_OP_MODE: ${{ inputs.op_mode }}
         run: python3 scripts/build_ipa_from_nsp.py "$RUNNER_TEMP/game" -k "$RUNNER_TEMP/prod.keys" --gpu none --allow-other-metal --progress lines 2>&1 | tee pack.log
       - name: Collect IPA
         if: ${{ inputs.build }}
