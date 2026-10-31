@@ -15,7 +15,7 @@ on:
         type: string
         default: ""
       op_mode:
-        description: "Console mode the game starts on: 0 handheld (lighter), 1 console; empty keeps the profile's"
+        description: "Console mode the game starts on: handheld (lighter) or console; empty keeps the profile's"
         type: string
         default: ""
       title_id:
