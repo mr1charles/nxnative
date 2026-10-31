@@ -18,9 +18,15 @@ on:
         description: "Title ID to put in the joined file's name (for a dump without a ticket or a [title ID] in its name)"
         type: string
         default: ""
+      to_release:
+        description: "Put the IPA on the 'ipas' release instead of a build artifact (artifact storage can run out; under 2 GB only)"
+        type: boolean
+        default: false
 jobs:
   ipa:
     runs-on: macos-26
+    permissions:
+      contents: write
     timeout-minutes: 180
     defaults:
       run:
@@ -67,8 +73,13 @@ jobs:
       - name: Collect IPA
         if: ${{ inputs.build }}
         run: mkdir -p out && cp "$RUNNER_TEMP"/game/*.ipa out/
+      - name: Upload IPA to the release
+        if: ${{ inputs.build && inputs.to_release }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload ipas out/*.ipa --clobber -R "$GITHUB_REPOSITORY"
       - uses: actions/upload-artifact@v4
-        if: ${{ inputs.build }}
+        if: ${{ inputs.build && !inputs.to_release }}
         with:
           name: ipa
           path: out/*.ipa
