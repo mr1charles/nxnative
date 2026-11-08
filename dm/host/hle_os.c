@@ -52,7 +52,27 @@ static int detclock_cfg(void) {
     static int c = -1; if (c < 0) { const char *e = getenv("DM_DETCLOCK"); g_gdet_step = e ? strtoull(e, 0, 0) : 0; c = g_gdet_step > 0; }
     return c;
 }
-static uint64_t wall_guest_ns(void) { return atomic_load(&g_gfz) ? atomic_load(&g_gfrozen) : now_ns() - atomic_load(&g_glag); }
+// Emulation speed (DM_SPEED): the guest clock runs at that multiple of real time, continuous. Until a speed other than 1 is asked for, the clock is exactly what it was (one atomic read).
+// Only games that move by elapsed time follow it: a game locked to the display's 60 Hz steps by frames, and sound is not sped up
+static _Atomic int g_sp_used, g_sp_inited; static _Atomic uint32_t g_sp_q = 65536;   // the speed in 16.16 fixed point
+static uint64_t g_sp_in, g_sp_out; static pthread_mutex_t g_sp_mu = PTHREAD_MUTEX_INITIALIZER;
+static uint64_t speed_xf(uint64_t in) {
+    if (!atomic_load(&g_sp_inited)) {
+        pthread_mutex_lock(&g_sp_mu);
+        if (!atomic_load(&g_sp_inited)) {
+            const char *e = getenv("DM_SPEED"); double s = e ? atof(e) : 1.0;
+            if (s >= 0.25 && s <= 4.0 && s != 1.0) { atomic_store(&g_sp_q, (uint32_t)(s * 65536.0)); g_sp_in = g_sp_out = in; atomic_store(&g_sp_used, 1); LOG("emulation speed %.2fx (DM_SPEED)", s); }
+            atomic_store(&g_sp_inited, 1);
+        }
+        pthread_mutex_unlock(&g_sp_mu);
+    }
+    if (!atomic_load(&g_sp_used)) return in;
+    pthread_mutex_lock(&g_sp_mu);
+    int64_t d = (int64_t)(in - g_sp_in); uint64_t r = g_sp_out + (uint64_t)(int64_t)((double)d * (double)atomic_load(&g_sp_q) / 65536.0);
+    pthread_mutex_unlock(&g_sp_mu);
+    return r;
+}
+static uint64_t wall_guest_ns(void) { return speed_xf(atomic_load(&g_gfz) ? atomic_load(&g_gfrozen) : now_ns() - atomic_load(&g_glag)); }
 uint64_t guest_ns(void) { return atomic_load(&g_gdet_on) ? atomic_load(&g_gdet) : wall_guest_ns(); }
 int dm_detclock_enabled(void) { return detclock_cfg() && atomic_load(&g_gdet_on); }
 void dm_guest_frame_tick(void) {

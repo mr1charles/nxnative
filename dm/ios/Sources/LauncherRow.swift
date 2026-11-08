@@ -3,7 +3,7 @@
 import SwiftUI
 
 extension LauncherModel {
-    func binding(_ s: Setting) -> Binding<String> { Binding(get: { self.values[s.env] ?? s.def }, set: { self.values[s.env] = $0 }) }
+    func binding(_ s: Setting) -> Binding<String> { Binding(get: { self.values[s.env] ?? s.def }, set: { self.values[s.env] = $0; if s.env == "DM_PRESET" { self.applyPreset($0) } }) }
 }
 
 struct SettingRow: View {

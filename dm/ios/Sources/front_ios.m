@@ -1,6 +1,7 @@
 // iOS front end (the iOS implementation of front.h): a centered 16:9 Metal view (black bars on both sides) + a full-screen virtual gamepad layer (DmGamepad.m, controls drawn over the picture).
 // The host runs on the big-stack thread started by main.m; front_run runs the guest directly on the calling thread.
 #import <UIKit/UIKit.h>
+#import <mach/mach.h>
 #import <QuartzCore/CAMetalLayer.h>
 #import <Metal/Metal.h>
 #import <AVFAudio/AVFAudio.h>
@@ -92,7 +93,7 @@ static void launcher_done(void) { [g_root startGame]; }
     self.game.frame = CGRectMake(floor((b.size.width - w) / 2), floor((b.size.height - h) / 2), w, h);
     if (self.fps) {   // the top row's free stretch: right of DmGamepad.m's L3 key (102 + 17 of its units from the safe edge), level with − / + (22 units down); u is its unit
         CGRect s = UIEdgeInsetsInsetRect(b, self.view.safeAreaInsets); CGFloat u = MIN(b.size.height / 430.0, 1.3);
-        self.fps.frame = CGRectMake(floor(CGRectGetMinX(s) + 130 * u), floor(CGRectGetMinY(s) + 22 * u - 11), 64, 22);
+        { const char *dt = getenv("DM_SHOW_DETAIL"); BOOL det = dt && atoi(dt) != 0; self.fps.frame = CGRectMake(floor(CGRectGetMinX(s) + 130 * u), floor(CGRectGetMinY(s) + 22 * u - 11), det ? 178 : 64, det ? 78 : 22); }
     }
 }
 - (void)viewDidAppear:(BOOL)a {
@@ -136,13 +137,26 @@ static UILabel *front_ios_fps_label(void) {
     const char *e = getenv("DM_SHOW_FPS");
     if (!(e ? atoi(e) != 0 : [[NSBundle.mainBundle objectForInfoDictionaryKey:@"DMShowFPS"] boolValue])) return nil;
     UILabel *l = [UILabel new];
-    l.font = [UIFont monospacedDigitSystemFontOfSize:13 weight:UIFontWeightSemibold]; l.textColor = UIColor.whiteColor; l.textAlignment = NSTextAlignmentCenter;
+    const char *dt = getenv("DM_SHOW_DETAIL"); BOOL detail = dt && atoi(dt) != 0;   // the detailed monitor: four lines, left aligned
+    l.font = [UIFont monospacedDigitSystemFontOfSize:detail ? 11 : 13 weight:UIFontWeightSemibold]; l.textColor = UIColor.whiteColor; l.textAlignment = detail ? NSTextAlignmentLeft : NSTextAlignmentCenter; l.numberOfLines = detail ? 4 : 1;
     l.backgroundColor = [UIColor colorWithWhite:0 alpha:0.45]; l.layer.cornerRadius = 6; l.layer.masksToBounds = YES; l.userInteractionEnabled = NO;
     l.text = @"-- fps";
     __block uint64_t n0 = mtl_present_count(); __block double t0 = CACurrentMediaTime();
     [NSTimer scheduledTimerWithTimeInterval:1.0 repeats:YES block:^(NSTimer *t) {
         (void)t; uint64_t n = mtl_present_count(); double now = CACurrentMediaTime();
-        if (now - t0 < 1.5) l.text = [NSString stringWithFormat:@"%.0f fps", (n - n0) / (now - t0)];   // a longer span is the time in the background: no reading
+        if (now - t0 < 1.5) {   // a longer span is the time in the background: no reading
+            double fps = (n - n0) / (now - t0);
+            if (!detail) l.text = [NSString stringWithFormat:@"%.0f fps", fps];
+            else {   // detailed monitor: frames put on screen, the process's memory and the OS's thermal state are measured; the rest is read from the settings in force
+                static uint64_t first_n; static double first_t; if (!first_t) { first_n = n; first_t = now; }
+                double avg = now > first_t ? (n - first_n) / (now - first_t) : fps;
+                struct task_vm_info vi; mach_msg_type_number_t cnt = TASK_VM_INFO_COUNT; double mem = task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&vi, &cnt) == KERN_SUCCESS ? vi.phys_footprint / 1073741824.0 : -1;
+                const char *cap = getenv("DM_FPS_TARGET"), *sc = getenv("DM_RENDER_SCALE"), *sp = getenv("DM_SPEED"), *th[] = {"nominal", "fair", "serious", "critical"};
+                int ts = (int)NSProcessInfo.processInfo.thermalState, capn = cap ? atoi(cap) : 0;
+                l.text = [NSString stringWithFormat:@" %.0f fps  %.1f ms\n avg %.1f  cap %@ %@\n %.2f GB  heat %s\n scale %s  speed %sx", fps, fps > 0 ? 1000.0 / fps : 0, avg,
+                          capn ? [NSString stringWithFormat:@"%d", capn] : @"-", capn ? (fps >= capn * 0.95 ? @"holds" : @"below") : @"no cap", mem, ts >= 0 && ts < 4 ? th[ts] : "?", sc ? sc : "1.0", sp ? sp : "1.0"];
+            }
+        }
         n0 = n; t0 = now;
     }];
     LOG("front end: frame-rate counter on");
