@@ -2187,19 +2187,46 @@ static void zb_report(const tex_t *t, unsigned base, const char *why) {
             free(m); }
         MLOG("[zb] ser=%llu: block height log2 %d (packaged %d), stride %u, depth %u, target %d, samples %d", (unsigned long long)t->serial, (int)t->L.tileH, t->d.pkg_block_h, t->d.stride, t->d.depth, t->d.target, t->d.samples); }
 }
+// Half-size textures (DM_TEX_HALF=auto|1|0; auto = on when the device has 4 GB of memory or less): a large sampled texture with mip levels is stored
+// without its full-size level, so its Metal texture is half the width and height and holds the guest's levels 1..n-1 (about a quarter of the memory).
+// Sampling uses normalized coordinates, so it looks the same, a little softer up close. Only packaged 2D textures from normal uploads (stamp set),
+// at least 256x256 with 3+ levels, not sparse; tex_view_mip_skip() shifts the level numbers of texture views onto the smaller texture.
+static int tex_half_on(void) {
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("DM_TEX_HALF");
+        if (e && (e[0] == '0' || e[0] == '1')) v = e[0] == '1';
+        else v = [NSProcessInfo processInfo].physicalMemory <= 5ull * 1024 * 1024 * 1024;
+        MLOG("[nvn-mtl] half-size textures %s (DM_TEX_HALF=%s, device memory %.1f GB)", v ? "ON" : "off", e ? e : "auto", [NSProcessInfo processInfo].physicalMemory / 1073741824.0);
+    }
+    return v;
+}
+static uint64_t g_half_n, g_half_saved;
+static unsigned tex_half_skip(const tex_t *t, int sparse) {
+    if (!tex_half_on() || sparse || t->d.target != NVN_TEXTURE_TARGET_2D || t->d.levels < 3 || t->d.width < 256 || t->d.height < 256 || t->d.samples > 1) return 0;
+    return 1;
+}
+unsigned tex_view_mip_skip(const tex_t *t, id<MTLTexture> base) {   // levels the Metal texture leaves out at the top (0 or 1)
+    return base && t->d.levels > 1 && base.mipmapLevelCount + 1 == t->d.levels && base.width < t->d.width ? 1 : 0;
+}
 static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp, id<MTLTexture> reuse) {
     MTLTextureDescriptor *d = tex_desc(t, 1);
     if (!d) return nil;
+    unsigned sk = stamp && d.mipmapLevelCount == t->d.levels ? tex_half_skip(t, t->pool && nvn_sparse_pool(t->pool)) : 0;
+    if (sk) { d.width = MAX(t->d.width >> 1, 1u); d.height = MAX(t->d.height >> 1, 1u); d.mipmapLevelCount = t->d.levels - 1; }
     // A BC texture on a GPU without BC support is made uncompressed (nvn_fmt_to_mtl_dev) and decoded on the CPU below, so the GPU deswizzle paths are off for it
     bcd_fmt bcf = BCD_1; int dec = 0;
     dec = bc_src_fmt(t->d.format, &bcf);
-    int direct = !dec && stamp && direct_upload_on() && g_nvn_deswz_gpu && !(t->pool && nvn_sparse_pool(t->pool)) && nvn_deswz_gpu_direct_supported(&t->d);
+    int direct = !sk && !dec && stamp && direct_upload_on() && g_nvn_deswz_gpu && !(t->pool && nvn_sparse_pool(t->pool)) && nvn_deswz_gpu_direct_supported(&t->d);
     if (direct) d.usage |= MTLTextureUsageShaderWrite | MTLTextureUsagePixelFormatView;
     id<MTLTexture> mt = reuse && reuse.pixelFormat == d.pixelFormat && reuse.width == d.width && reuse.height == d.height && reuse.mipmapLevelCount == d.mipmapLevelCount && reuse.textureType == d.textureType
                         && (reuse.usage & d.usage) == d.usage
                         ? reuse : [g_dev newTextureWithDescriptor:d];
     if (!mt) { RED_ONCE(2, "failed to create MTLTexture %ux%u format %#x target %d", t->d.width, t->d.height, t->d.format, t->d.target); return nil; }
     if (g_allocprof > 0) { static int n; if (n++ < 30 || n % 500 == 0) MLOG("new texture (%s) #%d ser=%llu %ux%ux%u format %#x target %d levels %u storage %p", __func__, n, (unsigned long long)t->serial, t->d.width, t->d.height, t->d.depth, t->d.format, t->d.target, t->d.levels, (void *)t->mem); }
+    if (sk && mt != reuse) { g_half_n++; g_half_saved += (uint64_t)t->d.width * t->d.height * 3 / 4;   // texels left out (level 0 is 3/4 of the shrink)
+        if (g_half_n <= 3 || g_half_n % 200 == 0) MLOG("[nvn-mtl] half-size texture #%llu ser=%llu %ux%u format %#x, %u levels stored of %u; %.0f M texels left out so far",
+            (unsigned long long)g_half_n, (unsigned long long)t->serial, t->d.width, t->d.height, t->d.format, d.mipmapLevelCount, t->d.levels, g_half_saved / 1e6); }
     res_add(mt);   // Both first upload and re-upload register residency here (Metal 4 does not make resources resident automatically; a missed registration = GPU address page fault)
     int sparse = t->pool && nvn_sparse_pool(t->pool);
     if (stamp) {   // no stamp: a one-time upload of content the CPU will not change (tex_init_fill), with no write tracking
@@ -2208,7 +2235,7 @@ static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp, id<MTLTexture
     int bw, bh, bpb = nvn_fmt_bpb(t->d.format, &bw, &bh);
     unsigned layers = (t->d.target == 4 || t->d.target == 9) ? t->d.depth : t->d.target == 8 ? 6 : t->d.target == 3 ? t->d.height : 1;   // a cube array's depth counts layer-faces (tex_desc)
     size_t total = 0;
-    for (unsigned l = 0; l < d.mipmapLevelCount; l++) {
+    for (unsigned l = sk; l < d.mipmapLevelCount + sk; l++) {
         uint32_t w = MAX(t->d.width >> l, 1u), h = MAX(t->d.height >> l, 1u), z = t->d.target == 2 ? MAX(t->d.depth >> l, 1u) : 1;
         total += dec ? (size_t)w * h * z * layers * bcd_out_bpp(bcf) : (size_t)((w + bw - 1) / bw) * bpb * ((h + bh - 1) / bh) * z * layers;
     }
@@ -2238,13 +2265,13 @@ static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp, id<MTLTexture
         size_t stg_off;
         id<MTLBuffer> stg = up_alloc(total ? total : 16, &stg_off);
         size_t off = 0; int enc_ok = g_up_ce != nil, nb0 = g_nup_blits;
-        for (unsigned l = 0; enc_ok && l < d.mipmapLevelCount; l++) {
+        for (unsigned l = sk; enc_ok && l < d.mipmapLevelCount + sk; l++) {
             uint32_t w = MAX(t->d.width >> l, 1u), h = MAX(t->d.height >> l, 1u), z = t->d.target == 2 ? MAX(t->d.depth >> l, 1u) : 1;
             size_t pitch = (size_t)((w + bw - 1) / bw) * bpb, rows = (h + bh - 1) / bh;
             for (unsigned y = 0; y < layers; y++) {
                 size_t poff; id<MTLBuffer> params = up_param_alloc(&poff);   // Metal 4 has no setBytes: the parameter block of each deswizzle is cut from a shared block (no new GPU buffer each time)
                 if (nvn_deswz_gpu_encode_m4(g_up_ce, g_up_ct, params, poff, (__bridge id<MTLBuffer>)mb, mo, &t->d, l, y, stg, stg_off + off, pitch)) { enc_ok = 0; break; }
-                up_blit_add(stg, stg_off + off, pitch, pitch * rows, MTLSizeMake(w, h, z), mt, y, l);
+                up_blit_add(stg, stg_off + off, pitch, pitch * rows, MTLSizeMake(w, h, z), mt, y, l - sk);
                 off += pitch * rows * z;
             }
         }
@@ -2270,7 +2297,7 @@ static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp, id<MTLTexture
     size_t off = 0;
     int zb = zblock_on() && t->d.format >= 0x79 && t->d.format <= 0x94; if (zb) { g_zb_ser = t->serial; g_zb_n = (int)MIN(d.mipmapLevelCount, 16u); memset(g_zb, 0, sizeof g_zb); memset(g_zb_tot, 0, sizeof g_zb_tot); }
     uint8_t *bctmp = NULL; size_t bctmp_n = 0;   // one deswizzled BC level, decoded into the staging area
-    for (unsigned l = 0; l < d.mipmapLevelCount; l++) {
+    for (unsigned l = sk; l < d.mipmapLevelCount + sk; l++) {
         uint32_t w = MAX(t->d.width >> l, 1u), h = MAX(t->d.height >> l, 1u), z = t->d.target == 2 ? MAX(t->d.depth >> l, 1u) : 1;
         size_t pitch = (size_t)((w + bw - 1) / bw) * bpb, rows = (h + bh - 1) / bh;
         if (dec) {
@@ -2279,7 +2306,7 @@ static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp, id<MTLTexture
             for (unsigned y = 0; y < layers; y++) {
                 if (nvn_deswizzle(&t->d, l, y, src, bctmp, pitch)) { RED_ONCE(9, "deswizzle failed format %#x target %d", t->d.format, t->d.target); break; }
                 for (uint32_t zz = 0; zz < z; zz++) bcd_decode_image(bcf, bctmp + zz * pitch * rows, w, h, (uint8_t *)stg.contents + off + zz * opitch * h, opitch);
-                up_blit_add(stg, off, opitch, opitch * h, MTLSizeMake(w, h, z), mt, y, l);
+                up_blit_add(stg, off, opitch, opitch * h, MTLSizeMake(w, h, z), mt, y, l - sk);
                 off += opitch * h * z;
             }
             continue;
@@ -2289,7 +2316,7 @@ static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp, id<MTLTexture
             if (zb && l < 16) { const uint64_t *q = (const uint64_t *)((const uint8_t *)stg.contents + off); size_t nb = pitch * rows * z / 16;
                 for (size_t i = 0; i < nb; i++) g_zb[l] += !(q[2 * i] | q[2 * i + 1]);
                 g_zb_tot[l] += (uint32_t)nb; }
-            up_blit_add(stg, off, pitch, pitch * rows, MTLSizeMake(w, h, z), mt, y, l);
+            up_blit_add(stg, off, pitch, pitch * rows, MTLSizeMake(w, h, z), mt, y, l - sk);
             off += pitch * rows * z;
         }
     }
@@ -4163,6 +4190,10 @@ static id<MTLTexture> tex_by_id(int tid) {   // Caller holds g_rmu
             sg = g_ser_gen;
         }
         NSUInteger l0 = r.v.set_levels ? r.v.base_level : 0, nl = r.v.set_levels && r.v.nlevels ? r.v.nlevels : base.mipmapLevelCount - l0;
+        {   // a half-size texture lacks level 0: the view's levels move down by one (a view of level 0 starts at the largest level there is)
+            unsigned hs = tex_view_mip_skip(&rp->t, base);
+            if (hs && r.v.set_levels) { NSUInteger cut = l0 < hs ? hs - l0 : 0; l0 = l0 > hs ? l0 - hs : 0; if (r.v.nlevels) nl = nl > cut ? nl - cut : 1; else nl = base.mipmapLevelCount - l0; }
+        }
         if (l0 >= base.mipmapLevelCount) { RED_ONCE(109, "texture view id %d starts at mip %lu beyond %lu levels", tid, (unsigned long)l0, (unsigned long)base.mipmapLevelCount); return nil; }
         // A level count past the texture's levels is cut to those it has, as deko3d's Tegra descriptor writer clips the maximum level (Echoes of Wisdom: levels 1 + 7 of a seven-level texture,
         // which Metal's validation refuses)
