@@ -16,6 +16,7 @@
 #             level=basic  a setting a front end shows first;  needs=<VAR>=<value>  a sub-setting, drawn only while the row that sets <VAR> has that value
 DM_PRESET	choice	verylow=Very Low,low=Low,medium=Medium,high=High (tested default)	high	platform:ios	Game	Graphics preset	Sets frame rate, render scale, dynamic resolution and upscaling together, for the options this game has. Pick one, then fine-tune the rows below. Lower presets run cooler and faster; High keeps the tested defaults.	level=basic
 DM_FPS_TARGET	choice	30=30 fps,60=60 fps	DM_GAME_FPS_TARGET	DM_GAME_FPS_TARGET!=0	Game	Frame rate		level=basic
+DM_FPS_TARGET	choice	0=Game's own,30=30 fps,60=60 fps	0	DM_GAME_FPS_TARGET==0	Game	Frame rate	Game's own keeps the tested behaviour. 30 fps shows each frame for two screen refreshes: cooler and steadier. Games that time their own frames (Super Mario Bros. Wonder) keep normal speed; others may run in slow motion, so check each game.	level=basic
 DM_DYNAMIC_RESOLUTION	toggle	-	0	fixups:DYNAMIC_RESOLUTION	Game	Dynamic resolution	Adjusts resolution between 70% and 100% under load. Turn off to keep full resolution for the selected console mode.
 DM_RENDER_SCALE	range	0.5:1.0:0.05	1.0	fixups:RENDER_SCALE	Game	Render scale		level=basic
 DM_OPMODE	choice	1=Docked,0=Handheld	DM_GAME_OPMODE	always	Game	Console mode		level=basic
