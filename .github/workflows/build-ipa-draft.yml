@@ -58,6 +58,12 @@ jobs:
             [ -e "$p0" ] || continue
             base="${p0%.part00}"; cat "$base".part[0-9][0-9] > "$base"; rm -f "$base".part[0-9][0-9]
           done
+          # release asset names cannot keep [ ]: NAME_<16-hex title ID>_<version>.nsp becomes "NAME [ID][version].nsp" for a dump without a ticket
+          for n in "$RUNNER_TEMP"/game/*_????????????????_*.nsp; do
+            [ -e "$n" ] || continue
+            b=$(basename "$n" .nsp); id=$(echo "$b" | grep -oE '[0-9A-Fa-f]{16}' | head -1); [ -n "$id" ] || continue
+            mv "$n" "$RUNNER_TEMP/game/${b%%_*} [$id][${b##*_}].nsp"
+          done
           echo "game files: $(ls "$RUNNER_TEMP/game" | wc -l), $(du -sh "$RUNNER_TEMP/game" | cut -f1)"
       - name: Pack (output goes to the private build log only)
         env:
