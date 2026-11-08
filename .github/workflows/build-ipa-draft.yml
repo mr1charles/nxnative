@@ -1,33 +1,29 @@
-name: Build IPA (draft release in, draft release out)
-# The game comes from a DRAFT release (visible only to repo writers) and the IPA goes back to a draft release;
-# nothing from the game or the IPA is attached to the (public) run. prod.keys is a repository secret.
+name: Build IPA (private in, private out)
+# Public repo, private data. The game comes from a DRAFT release and the IPA goes back to a DRAFT release; drafts are visible only
+# to the repo owner. Nothing about the game is printed to this (public) run log: no file names, no build output. The full build log
+# is uploaded to the draft release instead. No artifacts, no caches (both would be readable by others on a public repo).
+# Only the repo owner can start it (workflow_dispatch + the owner check), and prod.keys is a repository secret.
 on:
   workflow_dispatch:
     inputs:
       game_release:
-        description: "Name of the draft release holding the NSP"
+        description: "Name of the draft release holding the game, a neutral name like in-1 (it shows in the public log). Split pieces NAME.partNN are joined per file"
         type: string
-        default: dreambuffet-game
-      app_pool:
-        type: string
-        default: ""
-      op_mode:
-        type: string
-        default: ""
       env_lines:
-        description: "Diagnostic switches, KEY=VALUE separated by semicolons"
+        description: "Diagnostic switches, KEY=VALUE separated by semicolons (baked into the app)"
         type: string
         default: ""
       out_name:
-        description: "Name of the draft release the IPA is uploaded to"
+        description: "Name of the draft release for the IPA pieces and build log, a neutral name (it shows in the public log)"
         type: string
-        default: ipa-out
+        default: out-1
+permissions:
+  contents: write
 jobs:
   ipa:
+    if: github.actor == github.repository_owner
     runs-on: macos-26
-    permissions:
-      contents: write
-    timeout-minutes: 180
+    timeout-minutes: 240
     defaults:
       run:
         shell: bash -eo pipefail {0}
@@ -35,47 +31,70 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: build-main
+          persist-credentials: false
       - name: Tools
         run: |
-          brew install xcodegen zstd glslang
-          brew install --cask dotnet-sdk
-          xcodebuild -downloadComponent MetalToolchain
-          python3 -m pip install --break-system-packages lz4 capstone fonttools nsz "backports.zstd; python_version < '3.14'"
-      - name: Fetch keys and game
+          brew install xcodegen zstd glslang >/dev/null
+          brew install --cask dotnet-sdk >/dev/null
+          xcodebuild -downloadComponent MetalToolchain >/dev/null
+          python3 -m pip install -q --break-system-packages lz4 capstone fonttools nsz "backports.zstd; python_version < '3.14'"
+      - name: Fetch keys and game (quiet)
         env:
           PROD_KEYS_B64: ${{ secrets.PROD_KEYS_B64 }}
           GH_TOKEN: ${{ github.token }}
+          GAME_RELEASE: ${{ inputs.game_release }}
         run: |
-          test -n "$PROD_KEYS_B64"
+          test -n "$PROD_KEYS_B64" && test -n "$GAME_RELEASE"
+          umask 077
           echo "$PROD_KEYS_B64" | base64 -d > "$RUNNER_TEMP/prod.keys"
           mkdir -p "$RUNNER_TEMP/game"
-          rid=$(gh api "repos/$GITHUB_REPOSITORY/releases" --paginate --jq ".[]|select(.name==\"${{ inputs.game_release }}\")|.id" | head -1)
-          test -n "$rid"
-          gh api "repos/$GITHUB_REPOSITORY/releases/$rid/assets" --jq '.[]|"\(.id) \(.name)"' | while read -r id name; do
+          rid=$(gh api "repos/$GITHUB_REPOSITORY/releases" --paginate --jq ".[]|select(.draft and .name==\"$GAME_RELEASE\")|.id" | head -1)
+          test -n "$rid" || { echo "no draft release with that name"; exit 1; }
+          gh api "repos/$GITHUB_REPOSITORY/releases/$rid/assets" --paginate --jq '.[]|"\(.id) \(.name)"' | while read -r id name; do
             gh api -H "Accept: application/octet-stream" "repos/$GITHUB_REPOSITORY/releases/assets/$id" > "$RUNNER_TEMP/game/$name"
           done
-          for n in "$RUNNER_TEMP"/game/*_????????????????_*.nsp; do
-            [ -e "$n" ] || continue
-            b=$(basename "$n" .nsp); id=$(echo "$b" | grep -oE '[0-9A-Fa-f]{16}' | head -1)
-            mv "$n" "$RUNNER_TEMP/game/${b%%_*} [$id][${b##*_}].nsp"
+          # join NAME.part00, NAME.part01, … into NAME, separately for every split file
+          for p0 in "$RUNNER_TEMP"/game/*.part00; do
+            [ -e "$p0" ] || continue
+            base="${p0%.part00}"; cat "$base".part[0-9][0-9] > "$base"; rm -f "$base".part[0-9][0-9]
           done
-          ls -la "$RUNNER_TEMP/game"
-      - name: Pack
+          echo "game files: $(ls "$RUNNER_TEMP/game" | wc -l), $(du -sh "$RUNNER_TEMP/game" | cut -f1)"
+      - name: Pack (output goes to the private build log only)
         env:
-          NX_APP_POOL: ${{ inputs.app_pool }}
-          NX_OP_MODE: ${{ inputs.op_mode }}
           ENV_LINES: ${{ inputs.env_lines }}
         run: |
           EXTRA=()
-          if [ -n "$ENV_LINES" ]; then echo "$ENV_LINES" | tr ';' '\n' > "$RUNNER_TEMP/env.txt"; cat "$RUNNER_TEMP/env.txt"; EXTRA=(--env-file "$RUNNER_TEMP/env.txt"); fi
-          python3 scripts/build_ipa_from_nsp.py "$RUNNER_TEMP/game" -k "$RUNNER_TEMP/prod.keys" --gpu none --allow-other-metal --progress lines "${EXTRA[@]}" 2>&1 | tee pack.log
-      - name: IPA to the draft release
+          if [ -n "$ENV_LINES" ]; then echo "$ENV_LINES" | tr ';' '\n' > "$RUNNER_TEMP/env.txt"; EXTRA=(--env-file "$RUNNER_TEMP/env.txt"); fi
+          set +e
+          python3 scripts/build_ipa_from_nsp.py "$RUNNER_TEMP/game" -k "$RUNNER_TEMP/prod.keys" --gpu none --allow-other-metal --progress lines "${EXTRA[@]}" > "$RUNNER_TEMP/pack.log" 2>&1
+          rc=$?
+          set -e
+          rm -f "$RUNNER_TEMP/prod.keys"
+          echo "pack exit code $rc; IPAs: $(find . "$RUNNER_TEMP" -name '*.ipa' -not -path '*/node_modules/*' 2>/dev/null | wc -l)"
+          echo "$rc" > "$RUNNER_TEMP/pack.rc"
+      - name: IPA pieces + build log to the draft release (quiet)
+        if: always()
         env:
           GH_TOKEN: ${{ github.token }}
+          OUT_NAME: ${{ inputs.out_name }}
         run: |
-          rid=$(gh api "repos/$GITHUB_REPOSITORY/releases" --paginate --jq ".[]|select(.name==\"${{ inputs.out_name }}\")|.id" | head -1)
-          if [ -z "$rid" ]; then rid=$(gh api "repos/$GITHUB_REPOSITORY/releases" -f tag_name=ipa-out-tag -f name="${{ inputs.out_name }}" -F draft=true --jq .id); fi
-          for f in "$RUNNER_TEMP"/game/*.ipa; do
-            curl -sS --fail -X POST -H "Authorization: Bearer $GH_TOKEN" -H "Content-Type: application/octet-stream" \
-              --data-binary @"$f" "https://uploads.github.com/repos/$GITHUB_REPOSITORY/releases/$rid/assets?name=$(basename "$f" | tr ' ' '_')" | head -c 200
-          done
+          rid=$(gh api "repos/$GITHUB_REPOSITORY/releases" --paginate --jq ".[]|select(.draft and .name==\"$OUT_NAME\")|.id" | head -1)
+          if [ -z "$rid" ]; then rid=$(gh api "repos/$GITHUB_REPOSITORY/releases" -f tag_name="$OUT_NAME-tag" -f name="$OUT_NAME" -F draft=true --jq .id); fi
+          test -n "$rid"
+          up() {   # upload one file to the draft, printing nothing about it
+            curl -sS --fail -o /dev/null -X POST -H "Authorization: Bearer $GH_TOKEN" -H "Content-Type: application/octet-stream" \
+              --data-binary @"$1" "https://uploads.github.com/repos/$GITHUB_REPOSITORY/releases/$rid/assets?name=$2"
+          }
+          mkdir -p "$RUNNER_TEMP/out"; n=0
+          while IFS= read -r -d '' f; do
+            b=$(basename "$f" .ipa | tr -c 'A-Za-z0-9._-' '_' | sed 's/_*$//')
+            python3 -c 'import sys; exec("f=open(sys.argv[1],\"rb\")\ni=0\nwhile True:\n c=f.read(int(sys.argv[3]))\n if not c: break\n open(\"%s%02d\"%(sys.argv[2],i),\"wb\").write(c)\n i+=1")' "$f" "$RUNNER_TEMP/out/$b.ipa.part" 1992294400
+            for p in "$RUNNER_TEMP/out/$b.ipa.part"*; do up "$p" "$(basename "$p")"; n=$((n+1)); done
+            shasum -a 256 "$f" | awk '{print $1}' > "$RUNNER_TEMP/out/$b.ipa.sha256"; up "$RUNNER_TEMP/out/$b.ipa.sha256" "$b.ipa.sha256"
+          done < <(find . "$RUNNER_TEMP" -name '*.ipa' -not -path "$RUNNER_TEMP/out/*" -print0 2>/dev/null)
+          if [ -f "$RUNNER_TEMP/pack.log" ]; then gzip -c "$RUNNER_TEMP/pack.log" > "$RUNNER_TEMP/out/pack.log.gz"; up "$RUNNER_TEMP/out/pack.log.gz" "pack-${GITHUB_RUN_ID}.log.gz"; fi
+          echo "uploaded $n IPA piece(s) to the draft"
+          rc=$(cat "$RUNNER_TEMP/pack.rc" 2>/dev/null || echo 1); exit "$rc"
+      - name: Wipe game data from the runner
+        if: always()
+        run: rm -rf "$RUNNER_TEMP/game" "$RUNNER_TEMP/out" "$RUNNER_TEMP/prod.keys" "$RUNNER_TEMP/pack.log" out
