@@ -88,8 +88,9 @@ jobs:
           if [ -z "$rid" ]; then rid=$(gh api "repos/$GITHUB_REPOSITORY/releases" -f tag_name="$OUT_NAME-tag" -f name="$OUT_NAME" -F draft=true --jq .id); fi
           test -n "$rid"
           up() {   # upload one file to the draft, printing nothing about it
-            curl -sS --fail -o /dev/null -X POST -H "Authorization: Bearer $GH_TOKEN" -H "Content-Type: application/octet-stream" \
-              --data-binary @"$1" "https://uploads.github.com/repos/$GITHUB_REPOSITORY/releases/$rid/assets?name=$2"
+            # -T streams the file from disk (--data-binary @file loads all of it into memory: "out of memory" on 1.9 GB pieces)
+            curl -sS --fail --retry 3 --retry-all-errors -o /dev/null -X POST -H "Authorization: Bearer $GH_TOKEN" -H "Content-Type: application/octet-stream" \
+              -T "$1" "https://uploads.github.com/repos/$GITHUB_REPOSITORY/releases/$rid/assets?name=$2"
           }
           mkdir -p "$RUNNER_TEMP/out"; n=0
           while IFS= read -r -d '' f; do
